@@ -13,11 +13,12 @@ function loadScannerScript() {
   });
 }
 
+// Esperamos algo como https://luma.com/check-in/ev_xxx?pk=g-xxxx (o ticket key)
 function parseLumaUrl(text) {
   try {
     const u = new URL(text);
     const parts = u.pathname.split('/').filter(Boolean);
-    const eventId = parts.length >= 2 ? parts[1] : undefined;
+    const eventId = parts.length >= 2 ? parts[1] : undefined; // check-in/<ev_xxx>
     const pk = u.searchParams.get('pk') || undefined;
     return { eventId, pk };
   } catch {
@@ -27,22 +28,22 @@ function parseLumaUrl(text) {
 
 export default function EventPage() {
   const containerRef = useRef(null);
-  const [status, setStatus] = useState('idle');
-  const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState('idle'); // idle | ok | err
+  const [msg, setMsg] = useState('');
+  const [manual, setManual] = useState('');
 
   useEffect(() => { loadScannerScript(); }, []);
 
   const startScan = async () => {
-    setMessage('');
-    setStatus('idle');
-    const id = 'qr-reader';
-    if (!document.getElementById(id)) {
+    setMsg(''); setStatus('idle');
+    const targetId = 'qr-reader';
+    if (!document.getElementById(targetId)) {
       const d = document.createElement('div');
-      d.id = id;
+      d.id = targetId;
       containerRef.current?.appendChild(d);
     }
-    const scanner = new window.Html5QrcodeScanner(id, { fps: 10, qrbox: 250 }, false);
+    const scanner = new window.Html5QrcodeScanner(targetId, { fps: 10, qrbox: 250 }, false);
     scanner.render(async (text) => {
       scanner.clear();
       await handleText(text);
@@ -52,8 +53,7 @@ export default function EventPage() {
   const handleText = async (text) => {
     const { eventId, pk } = parseLumaUrl(text);
     if (!eventId || !pk) {
-      setStatus('error');
-      setMessage('Ese QR no parece de Luma. Abre tu ticket desde el email.');
+      setStatus('err'); setMsg('Ese QR no parece de Luma. Abre tu ticket desde el email/Wallet.');
       return;
     }
     try {
@@ -61,15 +61,13 @@ export default function EventPage() {
       const resp = await fetch('/api/checkin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ eventId, pk }),
+        body: JSON.stringify({ eventId, pk })
       });
       const data = await resp.json();
-      if (!resp.ok) throw new Error(data?.error || 'Error desconocido');
-      setStatus('success');
-      setMessage('✅ Check-in completado, gracias!');
+      if (!resp.ok) throw new Error(data?.error || 'No se pudo completar el check-in.');
+      setStatus('ok'); setMsg('✅ Check-in completado. ¡Gracias!');
     } catch (e) {
-      setStatus('error');
-      setMessage(e.message || 'No se pudo completar el check-in.');
+      setStatus('err'); setMsg(e?.message || 'Error desconocido');
     } finally {
       setBusy(false);
     }
@@ -80,12 +78,32 @@ export default function EventPage() {
       <Head><title>Volta | Check-in</title></Head>
       <h1>Check-in Volta</h1>
       <p>Escanea tu QR de Luma aquí 👇</p>
-      <div ref={containerRef}/>
+
+      <div ref={containerRef} />
       <button onClick={startScan} disabled={busy}>
         {busy ? 'Escaneando…' : 'Escanear mi ticket'}
       </button>
-      {status === 'success' && <p style={{ color: 'green' }}>{message}</p>}
-      {status === 'error' && <p style={{ color: 'red' }}>{message}</p>}
+
+      <div style={{ height: 12 }} />
+      <details>
+        <summary>¿No te lee el QR? Pega el enlace de tu ticket</summary>
+        <input
+          value={manual}
+          onChange={(e) => setManual(e.target.value)}
+          placeholder="https://luma.com/check-in/ev_xxx?pk=g-xxxx"
+          style={{ width: '100%', padding: 12 }}
+        />
+        <div style={{ height: 8 }} />
+        <button onClick={() => handleText(manual)} disabled={busy}>Enviar</button>
+      </details>
+
+      {status === 'ok' && <p style={{ color: 'green' }}>{msg}</p>}
+      {status === 'err' && <p style={{ color: 'red' }}>{msg}</p>}
+
+      <hr style={{ margin: '24px 0' }} />
+      <p style={{ fontSize: 12, opacity: 0.75 }}>
+        Privacidad: este dispositivo no guarda tus datos. Solo enviamos la clave del ticket a nuestros servidores para marcar asistencia.
+      </p>
     </main>
   );
 }
