@@ -8,22 +8,21 @@ function loadScannerScript() {
     s.src = 'https://unpkg.com/html5-qrcode@2.3.10/minified/html5-qrcode.min.js';
     s.async = true;
     s.onload = () => resolve();
-    s.onerror = reject;
+    s.onerror = () => reject(new Error('No se pudo cargar el lector de QR'));
     document.body.appendChild(s);
   });
 }
 
-// Esperamos algo como https://luma.com/check-in/ev_xxx?pk=g-xxxx (o ticket key)
 function parseLumaUrl(text) {
   try {
     const u = new URL(text);
     const parts = u.pathname.split('/').filter(Boolean);
-    const eventId = parts.length >= 2 ? parts[1] : undefined; // check-in/<ev_xxx>
+    let eventId;
+    if (parts[0] === 'check-in' && parts[1]) eventId = parts[1];         // ev_xxx
+    else if (parts[0] === 'e' && parts[1] === 'ticket' && parts[2]) eventId = parts[2]; // evt-xxx
     const pk = u.searchParams.get('pk') || undefined;
     return { eventId, pk };
-  } catch {
-    return {};
-  }
+  } catch { return {}; }
 }
 
 export default function EventPage() {
@@ -33,21 +32,57 @@ export default function EventPage() {
   const [msg, setMsg] = useState('');
   const [manual, setManual] = useState('');
 
-  useEffect(() => { loadScannerScript(); }, []);
+  useEffect(() => {
+    // Pre-cargar el script en segundo plano; ignoramos errores aquí
+    loadScannerScript().catch(() => {});
+  }, []);
 
   const startScan = async () => {
-    setMsg(''); setStatus('idle');
-    const targetId = 'qr-reader';
-    if (!document.getElementById(targetId)) {
-      const d = document.createElement('div');
-      d.id = targetId;
-      containerRef.current?.appendChild(d);
+    try {
+      setMsg(''); setStatus('idle'); setBusy(true);
+
+      // 1) Asegura que el script está cargado
+      await loadScannerScript();
+      if (!window.Html5QrcodeScanner) {
+        throw new Error('Lector no disponible. Recarga la página e intenta de nuevo.');
+      }
+
+      // 2) Crear contenedor si no existe
+      const targetId = 'qr-reader';
+      if (!document.getElementById(targetId)) {
+        const d = document.createElement('div');
+        d.id = targetId;
+        containerRef.current?.appendChild(d);
+      }
+
+      // 3) Lanzar el escáner (esto pedirá permiso de cámara)
+      const scanner = new window.Html5QrcodeScanner(
+        targetId,
+        { fps: 10, qrbox: 250 },
+        /* verbose */ false
+      );
+
+      scanner.render(
+        async (text) => { // onSuccess
+          try {
+            await handleText(text);
+          } finally {
+            // limpiar el escáner para poder volver a pulsar el botón
+            scanner.clear().catch(()=>{});
+            document.getElementById(targetId)?.remove();
+            setBusy(false);
+          }
+        },
+        (err) => {
+          // onError del escaneo continuo (ruido); no lo mostramos al usuario
+          // console.debug(err);
+        }
+      );
+    } catch (e) {
+      setStatus('err');
+      setMsg(e?.message || 'No se pudo iniciar la cámara. Revisa permisos.');
+      setBusy(false);
     }
-    const scanner = new window.Html5QrcodeScanner(targetId, { fps: 10, qrbox: 250 }, false);
-    scanner.render(async (text) => {
-      scanner.clear();
-      await handleText(text);
-    }, () => {});
   };
 
   const handleText = async (text) => {
@@ -56,21 +91,14 @@ export default function EventPage() {
       setStatus('err'); setMsg('Ese QR no parece de Luma. Abre tu ticket desde el email/Wallet.');
       return;
     }
-    try {
-      setBusy(true);
-      const resp = await fetch('/api/checkin', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ eventId, pk })
-      });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data?.error || 'No se pudo completar el check-in.');
-      setStatus('ok'); setMsg('✅ Check-in completado. ¡Gracias!');
-    } catch (e) {
-      setStatus('err'); setMsg(e?.message || 'Error desconocido');
-    } finally {
-      setBusy(false);
-    }
+    const resp = await fetch('/api/checkin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ eventId, pk })
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data?.error || 'No se pudo completar el check-in.');
+    setStatus('ok'); setMsg('✅ Check-in completado. ¡Gracias!');
   };
 
   return (
@@ -90,7 +118,7 @@ export default function EventPage() {
         <input
           value={manual}
           onChange={(e) => setManual(e.target.value)}
-          placeholder="https://luma.com/check-in/ev_xxx?pk=g-xxxx"
+          placeholder="https://luma.com/check-in/ev_xxx?pk=g-xxxx  o  https://luma.com/e/ticket/evt-xxx?pk=g-xxxx"
           style={{ width: '100%', padding: 12 }}
         />
         <div style={{ height: 8 }} />
@@ -101,9 +129,11 @@ export default function EventPage() {
       {status === 'err' && <p style={{ color: 'red' }}>{msg}</p>}
 
       <hr style={{ margin: '24px 0' }} />
-      <p style={{ fontSize: 12, opacity: 0.75 }}>
-        Privacidad: este dispositivo no guarda tus datos. Solo enviamos la clave del ticket a nuestros servidores para marcar asistencia.
-      </p>
+      <ul style={{ fontSize: 13, opacity: 0.75, lineHeight: 1.4 }}>
+        <li>La página debe abrirse bajo <b>https://</b> y aceptar permisos de cámara.</li>
+        <li>Si estás en iPhone, usa Safari o Chrome (no pestaña privada).</li>
+        <li>Si no aparece el cuadro del escáner tras pulsar, recarga la página y acepta permisos.</li>
+      </ul>
     </main>
   );
 }
